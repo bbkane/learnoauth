@@ -13,3 +13,12 @@ The goal here is to get auth1 functionality with mux and google oauth2, similar 
 Then I can add the session stuff as well as state param
 
 # a03-cookie
+
+- set cookie on login
+- save the following into a data structure
+  - user auth information from /login/github/callback (token)
+  - username
+  - cookie
+- redirect the user a page showing GitHub info if they're logged in
+
+https://pkg.go.dev/github.com/benbjohnson/wtf#Auth
