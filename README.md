@@ -22,3 +22,7 @@ Then I can add the session stuff as well as state param
 - redirect the user a page showing GitHub info if they're logged in
 
 https://pkg.go.dev/github.com/benbjohnson/wtf#Auth
+
+Ok, it looks like I'm setting the cookie in the response, but the browser isn't sending the cookie back. This leads to an Oauth state mismatch
+
+Let's make a "set and read cookie" folder until I can get back to this...

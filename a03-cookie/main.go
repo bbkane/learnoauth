@@ -17,6 +17,7 @@ import (
 	"github.com/bbkane/warg/value"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/securecookie"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/github"
 )
@@ -59,10 +60,67 @@ type User struct {
 	State string
 }
 
+const SessionCookieName = "sessionCookie"
+
+// Session contains per-user information in each request
+type Session struct {
+	// State is a random string we use to ensure Oauth requests come from our server.
+	// See https://www.sohamkamani.com/golang/oauth/#oauth-query-state
+	State string `json:"state"`
+}
+
+// sessionFromRequest reads the Session information from a request.
+// Returns an empty session, error if it runs into an error. When a cookie doesn't exist, returns Session{}, nil
+// Unlike most of my functions, it can return an empty Session AND an error at the same time.
+// cribbed from wtf (*Server).session
+func sessionFromRequest(sc *securecookie.SecureCookie, r *http.Request) (Session, error) {
+	// read session from request cookies
+	cookie, err := r.Cookie(SessionCookieName)
+	if err != nil {
+		if err == http.ErrNoCookie {
+			fmt.Println("cookie not found")
+			return Session{}, nil
+		}
+		return Session{}, err
+	}
+
+	var session Session
+	// TODO: how does this work with an empty/non-existent cookie
+	err = sc.Decode(SessionCookieName, cookie.Value, &session)
+	if err != nil {
+		return Session{}, err
+	}
+	return Session{}, nil
+}
+
+// addSessionToResponse saves the Session to a cookie. If there's an error encoding, it doesn't write anything and returns the error
+func addSessionToResponse(sc *securecookie.SecureCookie, rw http.ResponseWriter, session Session) error {
+	buf, err := sc.Encode(SessionCookieName, session)
+	if err != nil {
+		return fmt.Errorf("SessionToResponse err: %w", err)
+	}
+	fmt.Printf("", buf)
+	http.SetCookie(
+		rw,
+		&http.Cookie{
+			Name: SessionCookieName,
+			// Value:    buf,
+			Value:    "mycookie", // TODO: rm
+			Path:     "/",
+			Expires:  time.Now().Add(30 * 24 * time.Hour),
+			Secure:   false, // TODO: change when we start to use TLS
+			HttpOnly: true,
+		},
+	)
+	return nil
+}
+
 func run(pf flag.PassedFlags) error {
 	// this is a required flag, so we know it exists
+	blockKeyHex := pf["--block-key"].(string)
 	githubClientID := pf["--client-id"].(string)
 	githubClientSecret := pf["--client-secret"].(string)
+	hasKeyHex := pf["--hash-key"].(string)
 	port := pf["--port"].(int)
 
 	r := mux.NewRouter()
@@ -74,6 +132,21 @@ func run(pf flag.PassedFlags) error {
 		Endpoint:     github.Endpoint,
 	}
 
+	// Set up secure cookie management
+	// Decode from hex to byte slices.
+	hashKey, err := hex.DecodeString(hasKeyHex)
+	if err != nil {
+		return fmt.Errorf("invalid hash key")
+	}
+	blockKey, err := hex.DecodeString(blockKeyHex)
+	if err != nil {
+		return fmt.Errorf("invalid block key")
+	}
+
+	// Initialize cookie management & encode our cookie data as JSON.
+	sc := securecookie.New(hashKey, blockKey)
+	sc.SetSerializer(securecookie.JSONEncoder{})
+
 	// auth1: /
 	// wtf: /login
 	r.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
@@ -83,7 +156,10 @@ func run(pf flag.PassedFlags) error {
 	// auth1: /login/github/
 	// wtf: /oauth/github/
 	r.HandleFunc("/login/github/", func(rw http.ResponseWriter, r *http.Request) {
-		//
+
+		// Ignore errors in favor of an empty session if necessary
+		// NOTE: WTF *does* check the error case of a bad decode (which should only happen if the cookie is messed with)
+		session, _ := sessionFromRequest(sc, r)
 
 		// Generate new OAuth state for the session to prevent CSRF attacks.
 		state := make([]byte, 64)
@@ -91,12 +167,19 @@ func run(pf flag.PassedFlags) error {
 			fmt.Fprintf(rw, "state gen error: %v", err)
 			return
 		}
-		stateHex := hex.EncodeToString(state)
+
+		session.State = hex.EncodeToString(state)
+
+		err := addSessionToResponse(sc, rw, session)
+		if err != nil {
+			fmt.Fprintf(rw, "session to response err: %v", err)
+			return
+		}
 
 		http.Redirect(
 			rw,
 			r,
-			oauth2Cfg.AuthCodeURL(stateHex),
+			oauth2Cfg.AuthCodeURL(session.State),
 			http.StatusFound,
 		)
 
@@ -107,8 +190,18 @@ func run(pf flag.PassedFlags) error {
 	r.HandleFunc("/login/github/callback/", func(rw http.ResponseWriter, r *http.Request) {
 		state, code := r.FormValue("state"), r.FormValue("code")
 
-		// TODO: validate that GitHub state matches session state
-		fmt.Printf("state: %s", state)
+		session, err := sessionFromRequest(sc, r)
+		if err != nil {
+			fmt.Fprintf(rw, "cannot read state: %v", err)
+			return
+		}
+
+		if state != session.State {
+			fmt.Printf("session: %v\n", session)
+			fmt.Printf("form state: %v\n", state)
+			fmt.Fprintf(rw, "oauth state mismatch")
+			return
+		}
 
 		tok, err := oauth2Cfg.Exchange(r.Context(), code)
 		if err != nil {
@@ -138,7 +231,7 @@ func run(pf flag.PassedFlags) error {
 		WriteTimeout: 15 * time.Second,
 		ReadTimeout:  15 * time.Second,
 	}
-	err := srv.ListenAndServe()
+	err = srv.ListenAndServe()
 	if err != nil {
 		err = fmt.Errorf("server err: %w", err)
 		return err
@@ -157,6 +250,13 @@ func main() {
 				command.HelpShort("Run server"),
 				run,
 				command.Flag(
+					"--block-key",
+					"Cookie Block Key",
+					value.String,
+					flag.EnvVars("AUTH_BLOCK_KEY"),
+					flag.Required(),
+				),
+				command.Flag(
 					flag.Name("--client-id"),
 					flag.HelpShort("GitHub Client ID"),
 					value.String,
@@ -168,6 +268,13 @@ func main() {
 					flag.HelpShort("GitHub Client Secret"),
 					value.String,
 					flag.EnvVars("AUTH2_GITHUB_CLIENT_SECRET", "GITHUB_CLIENT_SECRET"),
+					flag.Required(),
+				),
+				command.Flag(
+					"--hash-key",
+					"Cookie Hash Key",
+					value.String,
+					flag.EnvVars("AUTH_HASH_KEY"),
 					flag.Required(),
 				),
 				command.Flag(
