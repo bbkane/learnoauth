@@ -76,21 +76,19 @@ type Session struct {
 func sessionFromRequest(sc *securecookie.SecureCookie, r *http.Request) (Session, error) {
 	// read session from request cookies
 	cookie, err := r.Cookie(SessionCookieName)
+	if err == http.ErrNoCookie {
+		return Session{}, nil
+	}
 	if err != nil {
-		if err == http.ErrNoCookie {
-			fmt.Println("cookie not found")
-			return Session{}, nil
-		}
 		return Session{}, err
 	}
 
 	var session Session
-	// TODO: how does this work with an empty/non-existent cookie
 	err = sc.Decode(SessionCookieName, cookie.Value, &session)
 	if err != nil {
 		return Session{}, err
 	}
-	return Session{}, nil
+	return session, nil
 }
 
 // addSessionToResponse saves the Session to a cookie. If there's an error encoding, it doesn't write anything and returns the error
@@ -99,19 +97,16 @@ func addSessionToResponse(sc *securecookie.SecureCookie, rw http.ResponseWriter,
 	if err != nil {
 		return fmt.Errorf("SessionToResponse err: %w", err)
 	}
-	fmt.Printf("", buf)
-	http.SetCookie(
-		rw,
-		&http.Cookie{
-			Name: SessionCookieName,
-			// Value:    buf,
-			Value:    "mycookie", // TODO: rm
-			Path:     "/",
-			Expires:  time.Now().Add(30 * 24 * time.Hour),
-			Secure:   false, // TODO: change when we start to use TLS
-			HttpOnly: true,
-		},
-	)
+	// fmt.Printf("", buf)
+	cookie := &http.Cookie{
+		Name:     SessionCookieName,
+		Value:    buf,
+		Path:     "/",
+		Expires:  time.Now().Add(30 * 24 * time.Hour),
+		Secure:   true,
+		HttpOnly: true,
+	}
+	http.SetCookie(rw, cookie)
 	return nil
 }
 
@@ -222,6 +217,35 @@ func run(pf flag.PassedFlags) error {
 	r.HandleFunc("/logout", func(rw http.ResponseWriter, r *http.Request) {
 
 	}).Methods("DELETE")
+
+	// this doesn't work
+	r.HandleFunc("/get", func(rw http.ResponseWriter, r *http.Request) {
+		sess, err := sessionFromRequest(sc, r)
+		if err != nil {
+			fmt.Fprintf(rw, "session err: %v", err)
+			return
+		}
+		fmt.Fprintf(rw, "session: %v", sess)
+	}).Methods("GET")
+
+	// this works
+	r.HandleFunc("/get2", func(rw http.ResponseWriter, r *http.Request) {
+		if cookie, err := r.Cookie(SessionCookieName); err == nil {
+			sess := &Session{}
+			if err := sc.Decode(SessionCookieName, cookie.Value, sess); err == nil {
+				fmt.Fprintf(rw, "session: %#v", sess)
+			}
+		}
+	}).Methods("GET")
+
+	r.HandleFunc("/set", func(rw http.ResponseWriter, r *http.Request) {
+		err := addSessionToResponse(sc, rw, Session{State: "state"})
+		if err != nil {
+			fmt.Fprintf(rw, "addSession err: %v", err)
+			return
+		}
+		fmt.Fprint(rw, "It worked")
+	}).Methods("GET")
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	fmt.Printf("Addr: http://%s\n", addr)
