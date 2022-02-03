@@ -75,8 +75,10 @@ type Session struct {
 // cribbed from wtf (*Server).session
 func sessionFromRequest(sc *securecookie.SecureCookie, r *http.Request) (Session, error) {
 	// read session from request cookies
+
 	cookie, err := r.Cookie(SessionCookieName)
 	if err == http.ErrNoCookie {
+		fmt.Println("errNoCookie")
 		return Session{}, nil
 	}
 	if err != nil {
@@ -154,7 +156,11 @@ func run(pf flag.PassedFlags) error {
 
 		// Ignore errors in favor of an empty session if necessary
 		// NOTE: WTF *does* check the error case of a bad decode (which should only happen if the cookie is messed with)
-		session, _ := sessionFromRequest(sc, r)
+		session, err := sessionFromRequest(sc, r)
+		if err != nil {
+			fmt.Fprintf(rw, "session err: %v", err)
+			return
+		}
 
 		// Generate new OAuth state for the session to prevent CSRF attacks.
 		state := make([]byte, 64)
@@ -165,7 +171,7 @@ func run(pf flag.PassedFlags) error {
 
 		session.State = hex.EncodeToString(state)
 
-		err := addSessionToResponse(sc, rw, session)
+		err = addSessionToResponse(sc, rw, session)
 		if err != nil {
 			fmt.Fprintf(rw, "session to response err: %v", err)
 			return
@@ -192,8 +198,8 @@ func run(pf flag.PassedFlags) error {
 		}
 
 		if state != session.State {
-			fmt.Printf("session: %v\n", session)
-			fmt.Printf("form state: %v\n", state)
+			fmt.Printf("session: %#v\n", session)
+			fmt.Printf("form state: %#v\n", state)
 			fmt.Fprintf(rw, "oauth state mismatch")
 			return
 		}
@@ -222,20 +228,11 @@ func run(pf flag.PassedFlags) error {
 	r.HandleFunc("/get", func(rw http.ResponseWriter, r *http.Request) {
 		sess, err := sessionFromRequest(sc, r)
 		if err != nil {
+			// "log" it :)
 			fmt.Fprintf(rw, "session err: %v", err)
 			return
 		}
-		fmt.Fprintf(rw, "session: %v", sess)
-	}).Methods("GET")
-
-	// this works
-	r.HandleFunc("/get2", func(rw http.ResponseWriter, r *http.Request) {
-		if cookie, err := r.Cookie(SessionCookieName); err == nil {
-			sess := &Session{}
-			if err := sc.Decode(SessionCookieName, cookie.Value, sess); err == nil {
-				fmt.Fprintf(rw, "session: %#v", sess)
-			}
-		}
+		fmt.Fprintf(rw, "session: %#v", sess)
 	}).Methods("GET")
 
 	r.HandleFunc("/set", func(rw http.ResponseWriter, r *http.Request) {
